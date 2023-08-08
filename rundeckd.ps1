@@ -1,8 +1,8 @@
 ## RUNDECK SERVICE CONFIGS
-$InstallMethod = "apache-daemon" # powershell, apache-daemon
+$InstallMethod = "apache-daemon"
 $ApacheDaemonUrl = "https://downloads.apache.org/commons/daemon/binaries/windows/commons-daemon-1.3.4-bin-windows.zip"
-$Java = "java" # java, C:\custom\java
-$RundeckService = "rundeckd" # rundecksvc, rundeck.bat
+$Java = "java" # java,C:\custom\java
+$RundeckService = "rundeckd"
 $RundeckWar = "rundeck.war"
 $WorkingDir = (Get-Location).Path
 $KeyStore = "$WorkingDir\etc\keystore"
@@ -11,20 +11,15 @@ $Launcher = "-server -Xms256m -Xmx2048m"
 $Launcher = "$Launcher -Dfile.encoding=UTF-8 -Dserver.http.port=4440"
 $Launcher = "$Launcher -Drdeck.base=$WorkingDir -Drundeck.config.location=$WorkingDir\server\config\rundeck-config.properties"
 $Launcher = "$Launcher -Drundeck.server.logDir=$WorkingDir\server\logs"
-#$Launcher = "$Launcher -Dserver.https.port=4443 -Drundeck.ssl.config=$WorkingDir\server\config\ssl.properties -Djavax.net.ssl.trustStore=$WorkingDir\etc\truststore"
-#$Launcher = "$Launcher -Drundeck.jaaslogin=true -Dloginmodule.name=multilogin -Dloginmodule.conf.name=jaas-multilogin.conf"
-#$Launcher = "$Launcher -Drd.encryption.default.password=rundeck"
-#$Launcher = "$Launcher -Djava.library.path=$WorkingDir"
 $LauncherArgs = "-d" # --skipinstall
-#$ENV:RUNDECK_PROP_DECRYPTER_PWD = "rundeck"
 
 
 ## SERVICE.LOG ROTATION CONFIGS
 # IMPORTANT: Windows will lock service.log file while in use by Rundeck. Must be done when service is down.
-$Enabled = "true" # true/false
-$Verbose = "true" # true/false
-$SkipClear = "false" # true/false skip clearing service.log for testing
-$Every = "start" # start/hour/day/month/size
+$Enabled = "true" # true,false
+$Verbose = "true" # true,false
+$SkipClear = "false" # true,false. Skip clearing service.log for testing
+$Every = "start" # start,hour,day,month,size
 $MaxCount = 10 # file count limit to rotate
 $MaxSize = 10MB # file zize limit to rotate
 $LogPath = ".\var\logs"
@@ -43,6 +38,61 @@ $ApacheDaemonLauncher = $Launcher.Replace(" ", "#")
 $Launcher = "$Launcher -jar $RundeckWar $LauncherArgs"
 $ZipLogs = Get-ChildItem -Path $LogPath -Filter "*.zip" -ErrorAction SilentlyContinue
 #Write-Output "Zip files found: $(($ZipLogs).Count)"
+
+
+## RUNDECK INSTALL
+Function RundeckInstall {
+  if ((Test-Path -Path "etc","server\config","libext","$LogPath") -EQ $False) {
+    Invoke-Expression -Command 'CMD /C "$Java $Launcher --installonly"'
+    New-Item -Path $WorkingDir -Name "etc" -ItemType Directory -Force
+    New-Item -Path $WorkingDir -Name "$LogPath" -ItemType Directory -Force
+    Write-Output "$RundeckService base installed"
+
+    if ($InstallMethod -EQ "apache-daemon") {
+      $ApacheDaemonInstall = "$ApacheDaemonInstall //IS/$RundeckService"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --DisplayName=""$RundeckService (Rundeck/ProcessAutomation)"""
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --LogLevel=Debug"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --LogPath=$WorkingDir"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --ServiceUser=LocalSystem"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --Startup=auto"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --StartMode=java"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --StartPath=$WorkingDir"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --StartParams=-jar#rundeck.war"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --PidFile=rundeckd.pid"
+      #$ApacheDaemonInstall = "$ApacheDaemonInstall --JvmMs=256 --JvmMx=2048"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --StdOutput=$WorkingDir\var\logs\service.log"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --StdError=$WorkingDir\var\logs\service.log"
+      $ApacheDaemonInstall = "$ApacheDaemonInstall --JvmOptions9=$ApacheDaemonLauncher"
+
+      Try {
+        Invoke-WebRequest -OutFile apache-daemon.zip $ApacheDaemonUrl
+      } Catch {
+        Write-Error "Apache Daemon binaries cannot be downloaded. Wrong link or old version" -ErrorAction Stop
+      }
+      Expand-Archive -Path apache-daemon.zip -DestinationPath apache-daemon -Force
+      Move-Item -Path apache-daemon\amd64\prunsrv.exe "$RundeckService`.exe" -Force
+      Move-Item -Path apache-daemon\prunmgr.exe "$RundeckService`w.exe" -Force
+      Remove-Item -Path apache-daemon -Recurse -Force
+      Invoke-Expression -Command 'CMD /C "$RundeckService`.exe $ApacheDaemonInstall"'
+    }
+  }
+
+  # SSL
+  if ("$Launcher" -Like "*server.https.port*" -and (Test-Path -Path "$KeyStore") -EQ $False) {
+    $Cert = (New-SelfSignedCertificate -DnsName $HostName -CertStoreLocation Cert:\LocalMachine\My)
+    Export-Certificate -FilePath $HostCert -Cert $Cert -Force
+    Export-PfxCertificate -Cert $Cert -FilePath $KeyStore -Password (ConvertTo-SecureString -String $KeyPass -AsPlainText -Force)
+    Copy-Item -Path $KeyStore -Destination "etc\truststore" -Force
+    Write-Output "$KeyStore created for $HostName (Cert: $Cert)"
+  }
+}
+
+
+## RUNDECK START
+Function RundeckStart {
+  Stop-Service -Name $RundeckService -Force
+  Start-Service -Name $RundeckService
+}
 
 
 ## ROTATION SERVICE
@@ -83,73 +133,16 @@ Function RotateBySize {
 
 Function DoRotation {
   if ($Enabled -EQ "false") { Exit 0 }
-  # Start
   if ($Every.ToLower() -EQ "start") { if (($ZipLogs).Count -LT $MaxCount) { RotateLog("$ServiceLog") } }
-  # Hourly
   if ($Every.ToLower() -EQ "hour") { RotateByTime("yyyyMMddhh") }
-  # Daily
   if ($Every.ToLower() -EQ "day") { RotateByTime("yyyyMMdd") }
-  # Monthly
   if ($Every.ToLower() -EQ "month") { RotateByTime("yyyyMM") }
-  # Size
   if ($Every.ToLower() -EQ "size") { RotateBySize }
-}
-
-
-## INSTALL
-Function RundeckInstall {
-  if ((Test-Path -Path "etc","server\config","libext","$LogPath") -EQ $False) {
-    Invoke-Expression -Command 'CMD /C "$Java $Launcher --installonly"'
-    New-Item -Path $WorkingDir -Name "etc" -ItemType Directory -Force
-    New-Item -Path $WorkingDir -Name "$LogPath" -ItemType Directory -Force
-    Write-Output "$RundeckService base installed"
-
-    if ($InstallMethod -EQ "apache-daemon") {
-	  $ApacheDaemonInstall = "$ApacheDaemonInstall //IS/$RundeckService"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --DisplayName=""$RundeckService (Rundeck/ProcessAutomation)"""
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --LogLevel=Debug"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --LogPath=$WorkingDir"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --ServiceUser=LocalSystem"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --Startup=auto"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --StartMode=java"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --StartPath=$WorkingDir"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --StartParams=-jar#rundeck.war"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --PidFile=rundeckd.pid"
-      #$ApacheDaemonInstall = "$ApacheDaemonInstall --JvmMs=256 --JvmMx=2048"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --StdOutput=$WorkingDir\var\logs\service.log"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --StdError=$WorkingDir\var\logs\service.log"
-      $ApacheDaemonInstall = "$ApacheDaemonInstall --JvmOptions9=$ApacheDaemonLauncher"
-
-      Try {
-        Invoke-WebRequest -OutFile apache-daemon.zip $ApacheDaemonUrl
-      } Catch {
-        Write-Error "Apache Daemon binaries cannot be downloaded. Wrong link or old version" -ErrorAction Stop
-      }
-      Expand-Archive -Path apache-daemon.zip -DestinationPath apache-daemon -Force
-      Move-Item -Path apache-daemon\amd64\prunsrv.exe "$RundeckService`.exe" -Force
-      Move-Item -Path apache-daemon\prunmgr.exe "$RundeckService`w.exe" -Force
-      Remove-Item -Path apache-daemon -Recurse -Force
-      Invoke-Expression -Command 'CMD /C "$RundeckService`.exe $ApacheDaemonInstall"'
-	}
-  }
-
-  # SSL
-  if ("$Launcher" -Like "*server.https.port*" -and (Test-Path -Path "$KeyStore") -EQ $False) {
-    $Cert = (New-SelfSignedCertificate -DnsName $HostName -CertStoreLocation Cert:\LocalMachine\My)
-    Export-Certificate -FilePath $HostCert -Cert $Cert -Force
-    Export-PfxCertificate -Cert $Cert -FilePath $KeyStore -Password (ConvertTo-SecureString -String $KeyPass -AsPlainText -Force)
-    Copy-Item -Path $KeyStore -Destination "etc\truststore" -Force
-    Write-Output "$KeyStore created for $HostName (Cert: $Cert)"
-  }
 }
 
 
 ## MANAGE
 RundeckInstall
 #DoRotation
-
-
-# Other methods
-# https://sourceforge.net/p/logrotatewin/wiki/LogRotate/
-
+RundeckStart
 
