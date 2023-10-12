@@ -1,3 +1,6 @@
+param([string]$Mode)
+
+
 ## RUNDECK SERVICE CONFIGS
 $InstallMethod = "apache-daemon"
 $ApacheDaemonUrl = "https://downloads.apache.org/commons/daemon/binaries/windows/commons-daemon-1.3.4-bin-windows.zip"
@@ -7,10 +10,8 @@ $RundeckWar = "rundeck.war"
 $WorkingDir = (Get-Location).Path
 $KeyStore = "$WorkingDir\etc\keystore"
 $KeyPass = "adminadmin"
-$Launcher = "-server -Xms256m -Xmx2048m"
+$Launcher = "-server -Xms2048m -Xmx2048m"
 $Launcher = "$Launcher -Dfile.encoding=UTF-8 -Dserver.http.port=4440"
-$Launcher = "$Launcher -Drdeck.base=$WorkingDir -Drundeck.config.location=$WorkingDir\server\config\rundeck-config.properties"
-$Launcher = "$Launcher -Drundeck.server.logDir=$WorkingDir\server\logs"
 $LauncherArgs = "-d" # --skipinstall
 
 
@@ -59,7 +60,7 @@ Function RundeckInstall {
       $ApacheDaemonInstall = "$ApacheDaemonInstall --StartPath=$WorkingDir"
       $ApacheDaemonInstall = "$ApacheDaemonInstall --StartParams=-jar#rundeck.war"
       $ApacheDaemonInstall = "$ApacheDaemonInstall --PidFile=rundeckd.pid"
-      #$ApacheDaemonInstall = "$ApacheDaemonInstall --JvmMs=256 --JvmMx=2048"
+      #$ApacheDaemonInstall = "$ApacheDaemonInstall --JvmMs=2048 --JvmMx=2048"
       $ApacheDaemonInstall = "$ApacheDaemonInstall --StdOutput=$WorkingDir\var\logs\service.log"
       $ApacheDaemonInstall = "$ApacheDaemonInstall --StdError=$WorkingDir\var\logs\service.log"
       $ApacheDaemonInstall = "$ApacheDaemonInstall --JvmOptions9=$ApacheDaemonLauncher"
@@ -80,8 +81,8 @@ Function RundeckInstall {
   # SSL
   if ("$Launcher" -Like "*server.https.port*" -and (Test-Path -Path "$KeyStore") -EQ $False) {
     $Cert = (New-SelfSignedCertificate -DnsName $HostName -CertStoreLocation Cert:\LocalMachine\My)
-    Export-Certificate -FilePath $HostCert -Cert $Cert -Force
     Export-PfxCertificate -Cert $Cert -FilePath $KeyStore -Password (ConvertTo-SecureString -String $KeyPass -AsPlainText -Force)
+    Export-Certificate -FilePath $HostCert -Cert $Cert -Force
     Copy-Item -Path $KeyStore -Destination "etc\truststore" -Force
     Write-Output "$KeyStore created for $HostName (Cert: $Cert)"
   }
@@ -142,7 +143,8 @@ Function DoRotation {
 
 
 ## MANAGE
-RundeckInstall
-#DoRotation
-RundeckStart
+if ($Mode -eq "") { Write-Error "Usage: [script] -Mode [RundeckInstall|RundeckStart|DoRotation]" ; exit 1 }
+if ($Mode -eq "RundeckInstall") { RundeckInstall }
+if ($Mode -eq "RundeckStart") { RundeckStart }
+if ($Mode -eq "DoRotation") { DoRotation }
 
